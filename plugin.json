@@ -1,0 +1,13 @@
+{
+    "name": "VoiceHub广播站排期",
+    "description": "展示广播站当日排期歌曲，按播放顺序显示歌曲信息。",
+    "version": "1.0.0",
+    "plugin_ver": 2,
+    "author": "LaoShui",
+    "settings": false,
+
+    "url": "https://github.com/laoshuikaixue/cw-voicehub-plugin",
+    "branch": "main",
+
+    "update_date": "2025/08/11"
+}
