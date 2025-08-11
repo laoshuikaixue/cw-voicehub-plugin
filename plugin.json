@@ -1,6 +1,6 @@
 {
     "name": "VoiceHub广播站排期",
-    "description": "展示广播站当日排期歌曲，按播放顺序显示歌曲信息。",
+    "description": "展示广播站当日排期歌曲，按播放顺序显示歌曲信息",
     "version": "1.0.0",
     "plugin_ver": 2,
     "author": "LaoShui",
