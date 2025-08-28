@@ -9,7 +9,7 @@ from qfluentwidgets import isDarkTheme
 WIDGET_CODE = 'widget_voicehub.ui'
 WIDGET_NAME = '广播站排期 | LaoShui'
 WIDGET_WIDTH = 380
-API_URL = "https://n.voicehub.lao-shui.top/api/songs/public"
+API_URL = "https://voicehub.lao-shui.top/api/songs/public"
 
 HEADERS = {
     'User-Agent': (
@@ -21,7 +21,7 @@ HEADERS = {
 
 class FetchThread(QThread):
     """网络请求线程"""
-    fetch_finished = pyqtSignal(list)  # 成功信号，传递歌曲列表
+    fetch_finished = pyqtSignal(list, object)  # 成功信号，传递歌曲列表和日期
     fetch_failed = pyqtSignal()  # 失败信号
 
     def __init__(self):
@@ -35,27 +35,48 @@ class FetchThread(QThread):
                 response = requests.get(API_URL, headers=HEADERS, proxies={'http': None, 'https': None})
                 response.raise_for_status()
                 data = response.json()
-                
+
                 if isinstance(data, list) and data:
                     # 获取今天的日期
                     today = datetime.now(timezone(timedelta(hours=8))).date()  # 使用北京时间
-                    
-                    # 过滤出今天的歌曲
+
+                    # 先尝试获取今天的歌曲
                     today_songs = []
                     for item in data:
                         play_date = datetime.fromisoformat(item['playDate'].replace('Z', '+00:00')).date()
                         if play_date == today:
                             today_songs.append(item)
-                    
+
                     # 按sequence排序
                     today_songs.sort(key=lambda x: x.get('sequence', 0))
-                    
+
                     if today_songs:
-                        self.fetch_finished.emit(today_songs)
+                        self.fetch_finished.emit(today_songs, today)
                         return
                     else:
-                        logger.warning("今天没有找到歌曲排期")
-                        
+                        logger.warning("今天没有找到歌曲排期，尝试查找往后最近的排期")
+
+                        # 如果今天没有排期，查找往后最近的排期
+                        future_dates = {}
+                        for item in data:
+                            play_date = datetime.fromisoformat(item['playDate'].replace('Z', '+00:00')).date()
+                            if play_date > today:  # 只查找今天之后的日期
+                                if play_date not in future_dates:
+                                    future_dates[play_date] = []
+                                future_dates[play_date].append(item)
+
+                        if future_dates:
+                            # 找到最近的日期
+                            nearest_date = min(future_dates.keys())
+                            nearest_songs = future_dates[nearest_date]
+                            nearest_songs.sort(key=lambda x: x.get('sequence', 0))
+
+                            logger.info(f"找到往后最近的排期日期: {nearest_date}")
+                            self.fetch_finished.emit(nearest_songs, nearest_date)
+                            return
+                        else:
+                            logger.warning("未找到任何往后的排期")
+
             except Exception as e:
                 logger.error(f"请求失败: {e}")
 
@@ -117,7 +138,7 @@ class SmoothScrollArea(QScrollArea):
         if hasattr(self.vScrollBar, 'scrollValue'):
             self.vScrollBar.scrollValue(-e.angleDelta().y())
 
-    def set_songs(self, songs, font_color="#000000"):
+    def set_songs(self, songs, font_color="#000000", display_date=None):
         """设置歌曲列表并显示"""
         self.songs = songs
         self.font_color = font_color
@@ -129,26 +150,13 @@ class SmoothScrollArea(QScrollArea):
         content_layout.setContentsMargins(10, 10, 10, 10)
         content_layout.setSpacing(15)
 
-        # 添加标题
-        title_label = QLabel("🎵 今日广播站排期")
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet(f"""
-            font-size: 16px;
-            color: {self.font_color};
-            font-weight: bold;
-            padding: 5px;
-            margin-bottom: 5px;
-            background: none;
-        """)
-        content_layout.addWidget(title_label)
-
-        # 添加歌曲信息
-        for i, song_item in enumerate(songs):
-            self.add_song_block(content_layout, song_item, i + 1)
-
-        # 如果没有歌曲，显示提示
-        if not songs:
-            no_songs_label = QLabel("今天暂无歌曲排期")
+        # 创建歌曲容器
+        if songs:
+            songs_container = self.create_songs_container(songs)
+            content_layout.addWidget(songs_container)
+        else:
+            # 如果没有歌曲，显示提示
+            no_songs_label = QLabel("暂无歌曲排期")
             no_songs_label.setAlignment(Qt.AlignCenter)
             no_songs_label.setStyleSheet(f"""
                 font-size: 14px;
@@ -158,36 +166,76 @@ class SmoothScrollArea(QScrollArea):
             """)
             content_layout.addWidget(no_songs_label)
 
+        # 只在正常状态时添加版权信息（非加载、非错误状态）
+        if songs and len(songs) > 0:
+            first_song = songs[0].get('song', {})
+            title = first_song.get('title', '')
+            # 排除加载和错误状态
+            if title not in ['正在加载中...', '网络连接异常']:
+                copyright_label = QLabel("Supported by VoiceHub | LaoShui @ 2025")
+                copyright_label.setAlignment(Qt.AlignCenter)
+                copyright_label.setStyleSheet(f"""
+                    font-size: 14px;
+                    color: {self.font_color};
+                    padding: 10px 5px 5px 5px;
+                    background: none;
+                    opacity: 0.7;
+                """)
+                content_layout.addWidget(copyright_label)
+
         # 设置滚动区域的widget
         self.setWidget(self.content_widget)
 
-    def add_song_block(self, layout, song_item, sequence):
-        """添加一首歌曲的信息块"""
+    def create_songs_container(self, songs):
+        """创建歌曲容器"""
+        container = QWidget()
+        container.setObjectName("songsContainer")  # 设置特定的对象名称
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(15, 0, 0, 0)  # 直接设置左边距
+        container_layout.setSpacing(0)
+
+        # 设置容器样式 - 使用特定选择器，只有左侧蓝色边框
+        container.setStyleSheet("""
+            QWidget#songsContainer {
+                background: transparent;
+                border-left: 4px solid #007ACC;
+            }
+        """)
+
+        # 添加所有歌曲
+        for i, song_item in enumerate(songs, 1):
+            song_label = self.create_song_label(song_item, i)
+            container_layout.addWidget(song_label)
+
+        return container
+
+    def create_song_label(self, song_item, sequence):
+        """创建单首歌曲标签"""
         song = song_item.get('song', {})
-        
+
         # 获取歌曲信息
         artist = song.get('artist', '未知艺术家')
         title = song.get('title', '未知歌曲')
         requester = song.get('requester', '未知')
         vote_count = song.get('voteCount', 0)
-        
+
         # 创建简洁的单行显示
         song_text = f"{sequence}. {artist} - {title} - {requester} - 热度:{vote_count}"
-        
+
         song_label = QLabel(song_text)
         song_label.setAlignment(Qt.AlignLeft)
         song_label.setWordWrap(True)
         song_label.setStyleSheet(f"""
-            font-size: 14px;
+            font-size: 16px;
+            font-weight: bold;
             color: {self.font_color};
-            padding: 8px 10px;
-            margin: 2px 0;
-            background: rgba(128, 128, 128, 0.1);
-            border-radius: 5px;
-            border-left: 3px solid #2196F3;
+            padding: 4px 0;
+            margin: 0;
+            background: transparent;
+            border: none;
         """)
-        
-        layout.addWidget(song_label)
+
+        return song_label
 
 
 class Plugin:
@@ -233,10 +281,10 @@ class Plugin:
         self.worker_thread.fetch_failed.connect(self.handle_failure)
         self.worker_thread.start()
 
-    def handle_success(self, songs):
+    def handle_success(self, songs, display_date):
         """处理成功响应"""
         self.enable_scrolling = True
-        self.update_widget_content(songs)
+        self.update_widget_content(songs, display_date=display_date)
         logger.success(f"成功获取到 {len(songs)} 首歌曲的排期信息")
 
     def handle_failure(self):
@@ -246,7 +294,7 @@ class Plugin:
         self.update_widget_content([], error=True)
         self.retry_timer.start(5 * 60 * 1000)  # 5分钟重试
 
-    def update_widget_content(self, songs, loading=False, error=False):
+    def update_widget_content(self, songs, loading=False, error=False, display_date=None):
         """更新小组件内容（线程安全）"""
         self.test_widget = self.method.get_widget(WIDGET_CODE)
         if not self.test_widget:
@@ -254,9 +302,9 @@ class Plugin:
             return
 
         # 使用QTimer.singleShot确保在主线程执行UI操作
-        QTimer.singleShot(0, lambda: self._update_ui(songs, loading, error))
+        QTimer.singleShot(0, lambda: self._update_ui(songs, loading, error, display_date))
 
-    def _update_ui(self, songs, loading=False, error=False):
+    def _update_ui(self, songs, loading=False, error=False, display_date=None):
         """实际执行UI更新的方法"""
         content_layout = self.find_child_layout(self.test_widget, 'contentLayout')
         if not content_layout:
@@ -264,13 +312,20 @@ class Plugin:
             return
 
         content_layout.setSpacing(5)
-        self.method.change_widget_content(WIDGET_CODE, WIDGET_NAME, WIDGET_NAME)
+
+        # 动态更新小组件标题
+        if display_date:
+            widget_title = f"广播站排期 | {display_date.strftime('%Y/%m/%d')}"
+        else:
+            widget_title = "广播站排期 | LaoShui"
+
+        self.method.change_widget_content(WIDGET_CODE, widget_title, widget_title)
 
         # 清除旧内容
         self.clear_existing_content(content_layout)
 
         # 创建滚动区域并设置内容
-        scroll_area = self.create_scroll_area(songs, loading, error)
+        scroll_area = self.create_scroll_area(songs, loading, error, display_date)
         if scroll_area:
             content_layout.addWidget(scroll_area)
             if not loading and not error:
@@ -283,7 +338,7 @@ class Plugin:
         """根据名称查找并返回布局"""
         return widget.findChild(QHBoxLayout, layout_name)
 
-    def create_scroll_area(self, songs, loading=False, error=False):
+    def create_scroll_area(self, songs, loading=False, error=False, display_date=None):
         scroll_area = SmoothScrollArea()
         scroll_area.setWidgetResizable(True)
 
@@ -303,7 +358,7 @@ class Plugin:
                     'requester': '系统'
                 }
             }]
-            scroll_area.set_songs(loading_songs, font_color)
+            scroll_area.set_songs(loading_songs, font_color, display_date)
         elif error:
             # 显示错误状态
             error_songs = [{
@@ -315,11 +370,11 @@ class Plugin:
                     'requester': 'LaoShui'
                 }
             }]
-            scroll_area.set_songs(error_songs, font_color)
+            scroll_area.set_songs(error_songs, font_color, display_date)
         else:
             # 显示正常歌曲列表
-            scroll_area.set_songs(songs, font_color)
-        
+            scroll_area.set_songs(songs, font_color, display_date)
+
         return scroll_area
 
     @staticmethod
@@ -349,7 +404,7 @@ class Plugin:
 
         # 执行滚动逻辑
         max_value = vertical_scrollbar.maximum()
-        if max_value > 0 and self.scroll_position >= max_value:
+        if 0 < max_value <= self.scroll_position:
             self.scroll_position = 0  # 滚动回顶部
         elif max_value == 0:
             self.scroll_position = 0
